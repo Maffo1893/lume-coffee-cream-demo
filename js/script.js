@@ -85,18 +85,6 @@ if (heroScroll && heroVideo) {
     let ticking = false;
     let lastTime = -1;
 
-    // Su decoder mobile più lenti i seek possono accodarsi se ne arriva uno nuovo
-    // prima che il precedente sia completato: si attende 'seeked' prima di
-    // richiederne un altro (con timeout di sicurezza per non restare mai bloccati
-    // se l'evento non arriva).
-    let seekPending = false;
-    let seekTimeout = null;
-    function markSeekDone() {
-      seekPending = false;
-      if (seekTimeout) { clearTimeout(seekTimeout); seekTimeout = null; }
-    }
-    heroVideo.addEventListener('seeked', markSeekDone);
-
     // currentTime = f(scroll): mappatura diretta e deterministica, nessuna inerzia.
     // Se il video non è pronto (o fallisce), --p continua comunque ad aggiornarsi:
     // testo e CTA restano utilizzabili anche senza video.
@@ -111,11 +99,9 @@ if (heroScroll && heroVideo) {
       const d = heroVideo.duration;
       if (!d || !isFinite(d)) return;
       const t = p * d;
-      if (Math.abs(t - lastTime) > 0.008 && !seekPending) {
+      if (Math.abs(t - lastTime) > 0.008) {
         heroVideo.currentTime = t;
         lastTime = t;
-        seekPending = true;
-        seekTimeout = setTimeout(markSeekDone, 300);
       }
     }
     function onHeroScroll() {
