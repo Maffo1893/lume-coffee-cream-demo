@@ -50,6 +50,29 @@ if (heroScroll && heroVideo) {
   heroVideo.addEventListener('loadeddata', onVideoReady, { once: true });
   if (heroVideo.readyState >= 2) onVideoReady();
 
+  // Priming per iOS Safari / Android Chrome: un <video> mai avviato non decodifica
+  // nuovi fotogrammi quando si assegna currentTime da JS (resta bloccato sul primo
+  // frame). Avviare la riproduzione (muted + playsinline non richiede gesture utente)
+  // e metterla subito in pausa "sblocca" il decoder, poi si riporta il video a frame 0
+  // così lo stato iniziale resta identico a prima dello scroll.
+  let primed = false;
+  function primeVideoForScrub() {
+    if (primed) return;
+    primed = true;
+    const resetFrame = () => { heroVideo.pause(); heroVideo.currentTime = 0; };
+    const playPromise = heroVideo.play();
+    if (playPromise && typeof playPromise.then === 'function') {
+      playPromise.then(resetFrame).catch(() => {});
+    } else {
+      resetFrame();
+    }
+  }
+  if (heroVideo.readyState >= 1) {
+    primeVideoForScrub();
+  } else {
+    heroVideo.addEventListener('loadedmetadata', primeVideoForScrub, { once: true });
+  }
+
   if (reduceMotion) {
     // Nessun lungo scroll-scrub: composizione finale statica, testo subito leggibile
     heroScroll.style.setProperty('--p', '1');
@@ -61,6 +84,18 @@ if (heroScroll && heroVideo) {
   } else {
     let ticking = false;
     let lastTime = -1;
+
+    // Su decoder mobile più lenti i seek possono accodarsi se ne arriva uno nuovo
+    // prima che il precedente sia completato: si attende 'seeked' prima di
+    // richiederne un altro (con timeout di sicurezza per non restare mai bloccati
+    // se l'evento non arriva).
+    let seekPending = false;
+    let seekTimeout = null;
+    function markSeekDone() {
+      seekPending = false;
+      if (seekTimeout) { clearTimeout(seekTimeout); seekTimeout = null; }
+    }
+    heroVideo.addEventListener('seeked', markSeekDone);
 
     // currentTime = f(scroll): mappatura diretta e deterministica, nessuna inerzia.
     // Se il video non è pronto (o fallisce), --p continua comunque ad aggiornarsi:
@@ -76,9 +111,11 @@ if (heroScroll && heroVideo) {
       const d = heroVideo.duration;
       if (!d || !isFinite(d)) return;
       const t = p * d;
-      if (Math.abs(t - lastTime) > 0.008) {
+      if (Math.abs(t - lastTime) > 0.008 && !seekPending) {
         heroVideo.currentTime = t;
         lastTime = t;
+        seekPending = true;
+        seekTimeout = setTimeout(markSeekDone, 300);
       }
     }
     function onHeroScroll() {
