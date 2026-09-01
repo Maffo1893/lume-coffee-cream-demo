@@ -42,66 +42,25 @@ const heroVideo = document.getElementById('hero-video');
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 if (heroScroll && heroVideo) {
-  // Il fade-in avviene solo a valle del warm-up qui sotto: niente flash nero e i
-  // pre-seek di preparazione restano invisibili (video ancora a opacità 0).
-  function onVideoReady() {
-    heroVideo.classList.add('is-ready');
-  }
-
-  // Pre-seek invisibile su alcuni punti sparsi del file, video ancora a opacità 0:
-  // forza il browser a scaricare in anticipo più regioni via richieste HTTP range,
-  // invece delle sole prime frazioni di secondo che il preload sequenziale coprirebbe
-  // da solo. Necessario perché il file è ad alto bitrate (~5 Mbps: ogni fotogramma è
-  // un I-frame per rendere economico il decode di ogni seek, ma pesante da scaricare)
-  // e su rete mobile, al primissimo scroll, spesso è arrivata solo una piccola
-  // porzione iniziale: un salto oltre quella porzione forza un round-trip di rete per
-  // ogni seek, causando gli scatti osservati solo al primo utilizzo. Budget di tempo
-  // limitato per non ritardare troppo la comparsa su reti molto lente, e annullato
-  // subito se l'utente inizia davvero a scrollare (vedi onHeroScroll più sotto).
-  let warmupCancel = null;
-  function warmupBuffer(done) {
-    const d = heroVideo.duration;
-    if (!d || !isFinite(d)) { done(); return; }
-    const points = [d * 0.85, d * 0.45, d * 0.65, 0];
-    let i = 0;
-    let finished = false;
-    function finish() {
-      if (finished) return;
-      finished = true;
-      heroVideo.removeEventListener('seeked', step);
-      clearTimeout(budget);
-      warmupCancel = null;
-      done();
-    }
-    function step() {
-      if (finished) return;
-      if (i >= points.length) { finish(); return; }
-      heroVideo.currentTime = points[i++];
-    }
-    warmupCancel = () => { heroVideo.currentTime = 0; finish(); };
-    heroVideo.addEventListener('seeked', step);
-    const budget = setTimeout(warmupCancel, 700);
-    step();
-  }
+  // Il poster (frame 0 statico) copre ogni istante prima che il video abbia dati:
+  // si può rivelare subito, senza aspettare alcun evento del video.
+  heroVideo.classList.add('is-ready');
 
   // Priming per iOS Safari / Android Chrome: un <video> mai avviato non decodifica
   // nuovi fotogrammi quando si assegna currentTime da JS (resta bloccato sul primo
   // frame). Avviare la riproduzione (muted + playsinline non richiede gesture utente)
-  // e metterla subito in pausa "sblocca" il decoder; poi parte il warm-up sopra (o,
-  // per chi preferisce ridurre il movimento, la rivelazione diretta).
+  // e metterla subito in pausa "sblocca" il decoder, senza audio né riproduzione
+  // visibile: il video torna a mostrare il poster/frame 0 finché non parte lo scrub.
   let primed = false;
   function primeVideoForScrub() {
     if (primed) return;
     primed = true;
-    const afterPlay = () => {
-      heroVideo.pause();
-      if (reduceMotion) { onVideoReady(); } else { warmupBuffer(onVideoReady); }
-    };
+    const resetFrame = () => { heroVideo.pause(); heroVideo.currentTime = 0; };
     const playPromise = heroVideo.play();
     if (playPromise && typeof playPromise.then === 'function') {
-      playPromise.then(afterPlay).catch(afterPlay);
+      playPromise.then(resetFrame).catch(() => {});
     } else {
-      afterPlay();
+      resetFrame();
     }
   }
   if (heroVideo.readyState >= 1) {
@@ -122,6 +81,55 @@ if (heroScroll && heroVideo) {
     let ticking = false;
     let lastTime = -1;
 
+    // ---- Gate di readiness per il cold start mobile ----
+    // Appena dopo il caricamento il decoder può essere "sbloccato" (priming) ma il
+    // file (~5 Mbps, ogni fotogramma è un I-frame per rendere economico il decode di
+    // ogni seek, ma pesante da scaricare) può non avere ancora dati sufficienti in
+    // buffer su rete mobile. Finché non è pronto NON si esegue alcun seek: si ricorda
+    // solo l'ultimo progresso richiesto (pendingP). Lo scroll e il testo (--p) restano
+    // sempre liberi. Appena la soglia è raggiunta si applica un unico seek all'ultimo
+    // progresso richiesto, poi lo scrub diventa quello normale, identico per tutte le
+    // piattaforme (non è una soglia a tempo: dipende dai segnali nativi del video).
+    let ready = false;
+    let pendingP = null;
+    const MIN_BUFFER_SECONDS = 0.6; // ~380KB al bitrate del file: prova di throughput reale
+
+    function isBufferReady() {
+      if (heroVideo.readyState < 3) return false; // HAVE_FUTURE_DATA
+      if (!heroVideo.seekable || heroVideo.seekable.length === 0) return false;
+      const b = heroVideo.buffered;
+      if (!b || b.length === 0) return false;
+      const need = Math.min(MIN_BUFFER_SECONDS, heroVideo.duration || MIN_BUFFER_SECONDS);
+      return (b.end(0) - b.start(0)) >= need;
+    }
+
+    function seekTo(p) {
+      const d = heroVideo.duration;
+      if (!d || !isFinite(d)) return;
+      const t = p * d;
+      if (Math.abs(t - lastTime) > 0.008) {
+        heroVideo.currentTime = t;
+        lastTime = t;
+      }
+    }
+
+    function markReady() {
+      if (ready) return;
+      ready = true;
+      readinessEvents.forEach(ev => heroVideo.removeEventListener(ev, checkReadiness));
+      clearTimeout(readinessBackstop);
+      if (pendingP != null) { seekTo(pendingP); pendingP = null; }
+    }
+    function checkReadiness() {
+      if (!ready && isBufferReady()) markReady();
+    }
+    const readinessEvents = ['progress', 'canplay', 'canplaythrough', 'loadeddata', 'timeupdate'];
+    readinessEvents.forEach(ev => heroVideo.addEventListener(ev, checkReadiness));
+    // Backstop di resilienza (non è il segnale primario): meglio sbloccare lo scrub
+    // tardi che restare bloccati per sempre se gli eventi di buffering non arrivano.
+    const readinessBackstop = setTimeout(markReady, 4000);
+    checkReadiness();
+
     // currentTime = f(scroll): mappatura diretta e deterministica, nessuna inerzia.
     // Se il video non è pronto (o fallisce), --p continua comunque ad aggiornarsi:
     // testo e CTA restano utilizzabili anche senza video.
@@ -133,18 +141,10 @@ if (heroScroll && heroVideo) {
       const p = Math.min(Math.max(raw, 0), 1);
       heroScroll.style.setProperty('--p', p.toFixed(4));
 
-      const d = heroVideo.duration;
-      if (!d || !isFinite(d)) return;
-      const t = p * d;
-      if (Math.abs(t - lastTime) > 0.008) {
-        heroVideo.currentTime = t;
-        lastTime = t;
-      }
+      if (!ready) { pendingP = p; return; }
+      seekTo(p);
     }
     function onHeroScroll() {
-      // Lo scroll reale dell'utente ha sempre la priorità sul warm-up in corso:
-      // lo interrompe subito così i due non si contendono currentTime.
-      if (warmupCancel) { const cancel = warmupCancel; warmupCancel = null; cancel(); }
       if (!ticking) { requestAnimationFrame(updateScrub); ticking = true; }
     }
 
