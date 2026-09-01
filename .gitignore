@@ -1,0 +1,11 @@
+# Tooling locale (non necessario al sito, non deve essere pubblicato)
+.claude/
+
+# Asset originale non utilizzato (sostituito da hero-coffee-cream-scrub.mp4)
+assets/video/hero-coffee-cream.mp4
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
